@@ -1,3 +1,4 @@
+from turtle import speed
 import requests
 import re
 from bs4 import BeautifulSoup
@@ -6,7 +7,7 @@ import os
 from tqdm import tqdm
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
-
+import time
 #重要提醒: 注意在本项目中, 函数或方法的path参数通常都需要在末尾添加'/', 如:'C:/Users/DELL/Desktop/'
 #重要提醒: 支持不同清晰度下载的方法需要ffmpeg第三方工具的支持, 若cmd显示找不到对应的程序, 可尝试将ffmpeg.exe放入system32文件夹中(详见python os.system函数的具体实现方式)
 
@@ -109,7 +110,70 @@ def Download_Pbar(url, path = 'C:/Users/DELL/Desktop/test1.mp4', headers = BiliD
     pbar.close()
     return file_size
 
-def Download_UIpbar(url, pbar: QProgressBar, path):
+#允许计算平均速度且包含进度条的下载函数
+def Download_UIpbar_average(url, pbar: QProgressBar, path):
+        #先获取内容大小
+        try:
+            #stream元素设定当访问content元素时才获取输入流
+            res = requests.get(url, headers= BiliDownloadHeaders, stream= True)
+            ResHeaders = res.headers
+            file_size = int(ResHeaders['Content-Length'])
+        except:
+            print('ERROR: Unsuccessful to obtain the content.(Perhaps the url is overdue.)')
+            file_size = 0
+        pbar.setMaximum(file_size)
+
+        count = 0
+        startTime = time.time()
+        with open(path, 'wb') as f:
+            lastTime = time.time()
+            for chunk in res.iter_content(chunk_size=1024):
+                if chunk:
+                    f.write(chunk)
+                    count += 1024
+                    pbar.setValue(count) #设置进度条进度
+                    QApplication.processEvents() #实时更新进度条
+                    currentTime = time.time()
+                    if currentTime - lastTime >= 1:
+                        speed = count / 1024 / 1024 / (currentTime - startTime)
+                        print(' Speed: ' + '%.2f'%speed + 'M/S')
+                        lastTime = time.time()
+        return file_size
+#允许计算当前速度且包含进度条的下载函数_currentSpeed
+def Download_UIpbar(url, pbar: QProgressBar, path, speedLabel: QLabel = None):
+        #先获取内容大小
+        try:
+            #stream元素设定当访问content元素时才获取输入流
+            res = requests.get(url, headers= BiliDownloadHeaders, stream= True)
+            ResHeaders = res.headers
+            file_size = int(ResHeaders['Content-Length'])
+        except:
+            print('ERROR: Unsuccessful to obtain the content.(Perhaps the url is overdue.)')
+            file_size = 0
+        pbar.setMaximum(file_size)
+
+        count = 0
+        count_tmp = 0
+        with open(path, 'wb') as f:
+            lastTime = time.time()
+            for chunk in res.iter_content(chunk_size=1024):
+                if chunk:
+                    f.write(chunk)
+                    count += 1024
+                    pbar.setValue(count) #设置进度条进度
+                    QApplication.processEvents() #实时更新进度条
+                    currentTime = time.time()
+                    timeSpan = currentTime - lastTime
+                    if timeSpan >= 0.5:
+                        speed = (count - count_tmp) / 1024 / 1024 / timeSpan
+                        count_tmp = count
+                        #print(' Speed: ' + '%.2f'%speed + 'M/S')
+                        if speedLabel != None:
+                            speedLabel.setText('%.2f MB/s'%speed)
+                        lastTime = time.time()
+        return file_size
+#只包含UI进度条的原始函数
+def Download_UIpbar_origin(url, pbar: QProgressBar, path):
         #先获取内容大小
         try:
             #stream元素设定当访问content元素时才获取输入流
@@ -122,15 +186,13 @@ def Download_UIpbar(url, pbar: QProgressBar, path):
         pbar.setMaximum(file_size)
         with open(path, 'wb') as f:
             CurrentValue = 0
-            #使用迭代器模式获取content, 以1024Bytes为单位读取并写入本地
             for chunk in res.iter_content(chunk_size=1024):
                 if chunk:
                     f.write(chunk)
                     CurrentValue += 1024
                     pbar.setValue(CurrentValue) #设置进度条进度
                     QApplication.processEvents() #实时更新进度条
-        return file_size
-        pass  
+        return file_size  
 #Bilivideo类, 传入bvid即可自动构造video实例
 class BiliVideo(object):
     model = 'https://www.bilibili.com/video/'
@@ -367,7 +429,7 @@ class BiliVideo(object):
         AudioList = dict_0['data']['dash']['audio']
         
         #1080p+有两种代码: 112, 116, 带来一定的困难
-        QualityDict = {"4k":[120,6], "1080p+":[116,5], "1080p":[80,4], "720p":[64,3], "480p":[32,2], "360p":[16,1]}
+        QualityDict = {"4k":[120,6], "1080p+":[112,5], "1080p":[80,4], "720p":[64,3], "480p":[32,2], "360p":[16,1]}
         ReverseQualityDict = {'120':'4k','116':'1080p+','112':'1080p+','80':'1080p','64':'720p','32':'480p'}
         
         MaxQuality = VideoList[0]['id']
@@ -384,13 +446,13 @@ class BiliVideo(object):
             return {'video':VideoList[0]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
         
         #清晰度是否过高
-        if MaxQuality == 112: #处理特殊情况: 1080p+的id为112(番剧?)
+        if MaxQuality == 116: #处理特殊情况: 1080p+的id为112(番剧?)
             index = 0
             for i, element in enumerate(VideoList):
                 if element['id'] == 112 :
                     index = i
                     break
-            return {'video':VideoList[index]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
+            #return {'video':VideoList[index]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
         #正常情况下的处理: 在字典中寻找并比较id值
         if(QualityDict[descript][0] > MaxQuality):
             print('The VideoQuality is too high.(Or the Cookie is Overdue)')
@@ -555,7 +617,7 @@ class BiliVideo(object):
             return False
         return True
     
-    def mergeOutput_UIpbar(self, pbar: QProgressBar, label: QLabel, Quality = '360p', path = 'C:/Users/DELL/Desktop/'):
+    def mergeOutput_UIpbar(self, pbar: QProgressBar, label: QLabel, speedLabel: QLabel = None, Quality = '360p', path = 'C:/Users/DELL/Desktop/'):
         #类名检测, 若是番剧类型则将名称附上序号
         """
         if type(self) == Bangumi:
@@ -574,11 +636,11 @@ class BiliVideo(object):
         #是否启用进度条?
         #print('Downloading video:')
         label.setText('Downloading video:')
-        Download_UIpbar(VideoURL, path = videoname, pbar= pbar)
+        Download_UIpbar(VideoURL, path = videoname, pbar= pbar, speedLabel= speedLabel)
         pbar.reset()
         #print('Downloading audio:')
         label.setText('Downloading audio:')
-        Download_UIpbar(AudioURL, path = audioname, pbar= pbar)
+        Download_UIpbar(AudioURL, path = audioname, pbar= pbar, speedLabel= speedLabel)
         pass
         
         print(f'OutputPath: {path}')
@@ -736,7 +798,7 @@ def main():
     #print(bangumi.cid)
     video = BiliVideo('BV1hY411N7Gk')
     #video.MergeOutput(Quality='1080p+')
-    video.GetFace()
+    #video.MergeOutput(pbar= True)
     #bangumi.MergeOutput(pbar= True, Quality= '1080p')
     #print(bangumi.DetailedLink_1(Quality= '1080p+'))
     

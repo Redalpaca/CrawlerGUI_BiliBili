@@ -1,13 +1,12 @@
-from ast import arg
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5 import QtCore
-import time
+import json
 import sys
 from BiliClass import BiliVideo
 import os
 import ctypes
-
+#获取原对象
 def get_object(object_id):
     return ctypes.cast(object_id, ctypes.py_object).value
 
@@ -64,7 +63,11 @@ class Example(QMainWindow):
         pass
     #获取多个视频的总界面
     def InitUI_multiple(self):
+        #默认信息输出路径
+        self.infoPath = self.outputPath
         self.centralUI_multiple = CentralWidget_multiple(self)
+        self.centralUI_multiple.startSignal.connect(self.StartSpider_multiple)
+        self.centralUI_multiple.searchSignal.connect(self.searchVideoInfo)
         #在开始爬虫前检查输出路径
         if(not os.path.exists(self.outputPath)):
             self.pathCritical()
@@ -97,7 +100,17 @@ class Example(QMainWindow):
         reply = msgBox.exec() 
         if reply == QMessageBox.Retry:
             self.child_window.show()
-            pass     
+            pass
+    def bvidCritical_multiple(self):
+        msgBox = QMessageBox()
+        msgBox.setWindowTitle('BvidError')
+        msgBox.setIcon(QMessageBox.Critical)
+        msgBox.setText("The video you select is not exist.")
+        msgBox.setStandardButtons(QMessageBox.Ignore)
+        msgBox.setDefaultButton(QMessageBox.Ignore)
+        reply = msgBox.exec() 
+        if reply == QMessageBox.Ignore:
+            return False     
     def pathCritical(self):
         msgBox = QMessageBox()
         msgBox.setWindowTitle('PathError')
@@ -110,6 +123,15 @@ class Example(QMainWindow):
             self.child_window.show()
         else:
             return False
+        pass
+    def indexCritical(self):
+        msgBox = QMessageBox()
+        msgBox.setWindowTitle('PathError')
+        msgBox.setIcon(QMessageBox.Critical)
+        msgBox.setText("The index you input point to a non-existent video.")
+        msgBox.setStandardButtons(QMessageBox.Retry)
+        msgBox.setDefaultButton(QMessageBox.Retry)
+        reply = msgBox.exec() 
         pass
     #测试输入框
     def showDialog(self):
@@ -163,8 +185,10 @@ class Example(QMainWindow):
             QMessageBox.No, QMessageBox.No) #最后一个是默认按钮
         if reply == QMessageBox.Yes:
             event.accept()
+            
             if self.child_window != None:
                 self.child_window.close()
+            sys.exit() #关闭窗口不意味着进程结束
         else:
             event.ignore()
     #显示子窗口
@@ -215,7 +239,8 @@ class Example(QMainWindow):
             QApplication.processEvents() 
         """
         #实现爬虫的代码
-        self.video.mergeOutput_UIpbar(self.pbar, Quality= self.quality, path= self.outputPath, label= downloadLabel)
+        self.video.mergeOutput_UIpbar(self.pbar, Quality= self.quality, path= self.outputPath,
+                                      label= downloadLabel, speedLabel= self.centralUI_single.speed)
         
         downloadLabel.setText('Download over.')
         self.pbar.reset()
@@ -223,6 +248,7 @@ class Example(QMainWindow):
         
         #self.centralUI_single.flayout_left.removeRow(1)
         #BV1BB4y1G7g2 BV1uS4y1w7cQ
+        #Show the total information of the video.
         if self.centralUI_single.getTotal == True:
             print(self.TotalInfo)
             for key, value in self.TotalInfo.items():
@@ -251,10 +277,76 @@ class Example(QMainWindow):
         pass
     def StartSpider_multiple(self):
         self.centralUI_multiple.createProgressBar()
+        self.videoList = []
+        path = self.outputPath + str('VideoSave_BiliBili') + '/'
+        if(not os.path.exists(path)):
+            os.makedirs(path)
+         
+        for index, bv_id in enumerate(self.bvidList):
+            video = BiliVideo(bv_id)
+            pbar= self.centralUI_multiple.PBarList[index]
+            label= self.centralUI_multiple.pbarLabelList[index]
+            self.videoList.append(video)
+            if video.res.status_code == 200:
+                #此处是在右上角方框显示信息
+                info = str(index + 1)+ ' ' + bv_id + '  title: %s'%(video.title)
+                self.centralUI_multiple.labelList[index].setText(info)
+                
+                #The following is the body of video crawler
+                video.mergeOutput_UIpbar(pbar= pbar, Quality= self.quality,
+                                         path= path, label= label, speedLabel= self.centralUI_multiple.speed)
+                label.setText('Video %s download Over.'%str(index + 1))
+                pbar.reset()
+                #self.centralUI_multiple.PBarList[index].setValue(0)
+            else:
+                info = str(index + 1) + ' Illigal bv_id.'
+                self.centralUI_multiple.labelList[index].setText(info)
+                label.setText('Video %s: non-existent.'%str(index + 1))
+                #pbar.setValue(0) BV1r14y1W7pv,BV1sG4y1k7iF, asdfasdfaasdfasdfasdf, BV1r14y1W7pv
+            self.centralUI_multiple.progress.setText('%d/%d'%(index+1, len(self.bvidList)))
+            pass
+        
         print('test')
+        if self.centralUI_multiple.getTotal:
+            self.saveVideoInfo()
+            pass
         pass
+    def searchVideoInfo(self, videoIndex: str):
+        #for i in self.videoList:
+        #    print(i.bvid)
+        index = int(videoIndex) - 1
+        if  index < 0 or index >= len(self.bvidList):
+            self.indexCritical()
+            return
+        #如果BiliVideo对象已经保存了, 则在内存中直接获取信息, 效率很高
+        try:
+            tempVideo = self.videoList[index]
+        except:
+            tempVideo = BiliVideo(self.bvidList[index])
+        
+        if tempVideo.res.status_code != 200:
+            self.bvidCritical_multiple()
+            return
+        self.child_window_info = Child_multiple_info(self, tempVideo)
+        self.child_window_info.show()
+        pass
+    def saveVideoInfo(self):
+        infoList = []
+        for video in self.videoList:
+            video: BiliVideo
+            if video.res.status_code == 200:
+                tempDict = video.TotalInfo()
+                tempDict['legal'] = True
+                infoList.append(tempDict)
+            else:
+                infoList.append(dict(legal = False))
+        jsonStr = json.dumps(infoList)
+        with open(self.infoPath + 'video.json', 'w') as f:
+            f.write(jsonStr)
+        pass
+
 #QMainWindow自带layout, 实际排版的时候不能加入布局, 而是加入中心组件
-#获取单个视频时中心组件的构造
+#选择单个视频时中心组件的构造类
 class CentralWidget_single(QWidget):
     def __init__(self, window: Example):
         super().__init__()
@@ -329,6 +421,8 @@ class CentralWidget_single(QWidget):
         
         BasicInfo = self.window.BasicInfo
         
+        speed_label = QLabel('Speed:\t')
+        self.speed = QLabel('0.00 MB/s')
         title_label = QLabel('Title:\t')
         title = QLabel(BasicInfo['title'])
         title.setWordWrap(True)
@@ -342,6 +436,7 @@ class CentralWidget_single(QWidget):
         self.flayout.addRow(aid_label, aid)
         self.flayout.addRow(cid_label, cid)
         self.flayout.addRow(author_label, author)
+        self.flayout.addRow(speed_label, self.speed)
         
         #将局部布局设为部件类的对象, 这就不会出现布局冲突问题
         hwg = QWidget()
@@ -373,8 +468,7 @@ class CentralWidget_single(QWidget):
         pass    
         
     pass
-
-#获取单个视频的子窗口类
+#获取单个视频定位信息的子窗口类
 class Child(QWidget):
     def __init__(self, parent=None):
         super(Child, self).__init__(parent)
@@ -431,8 +525,10 @@ class Child(QWidget):
         self.close()
         return signalTuple
 
-#获取多个视频时中心组件的构造
+#选择多个视频时中心组件的构造类
 class CentralWidget_multiple(QWidget):
+    startSignal = QtCore.pyqtSignal()
+    searchSignal = QtCore.pyqtSignal(str)
     def __init__(self, window: Example):
         super().__init__()
         id_ = id(window)
@@ -465,12 +561,18 @@ class CentralWidget_multiple(QWidget):
         wlayout_right = QVBoxLayout() # 右侧全局布局（1个）：水平
         
         topFiller_right = QWidget()
+        #防止过小无法显示
+        topFiller_right.setMinimumSize(1200, 400)
         fflayout_inner_right = QFormLayout()
         topFiller_right.setLayout(fflayout_inner_right)
-        for bv_id in self.window.bvidList:
-            #bv_id = bv_id.replace('\'','').replace(' ','')
+        self.labelList = []
+        for index, bv_id in enumerate(self.window.bvidList):
+            bv_id = bv_id.replace('\'','').replace(' ','')
+            self.window.bvidList[index] = bv_id
             testLabel = QLabel()
-            testLabel.setText(bv_id)
+            #testLabel.setMinimumWidth(300)
+            testLabel.setText(str(index+1) + ' ' + bv_id)
+            self.labelList.append(testLabel)
             fflayout_inner_right.addRow(testLabel)
             pass
         self.scroll_right = QScrollArea()
@@ -482,9 +584,18 @@ class CentralWidget_multiple(QWidget):
         self.flayout_msg = QFormLayout()
         self.flayout = QFormLayout()
         
+        #Select the index of the video which you wanna get info from.
+        self.indexCombo = QComboBox()
+        self.indexCombo.addItems([str(i) for i in range(1, len(self.window.bvidList)+1)])
+        self.bt_infoSearch = QPushButton()
+        self.bt_infoSearch.setText('Search')
+        self.bt_infoSearch.clicked.connect(self.sendSearchSignal)
+        self.flayout_msg.addRow(self.indexCombo, self.bt_infoSearch)
+                
         #放置开关按钮和复选框
         self.bt_start = QPushButton('Start')
-        self.bt_start.clicked.connect(self.window.StartSpider_multiple)
+        #self.bt_start.clicked.connect(self.window.StartSpider_multiple)
+        self.bt_start.clicked.connect(self.sendStartSignal)
         #复选框
         self.checkbox_msg = QCheckBox('Require basic information of the video?')
         self.checkbox_msg.setChecked(False)
@@ -495,19 +606,20 @@ class CentralWidget_multiple(QWidget):
         
         #BasicInfo = self.window.BasicInfo
         
-        title_label = QLabel('Title:\t')
-        title = QLabel('test')
-        title.setWordWrap(True)
-        author_label = QLabel('Author:\t')
-        author = QLabel('test')
+        speed_label = QLabel('Speed:\t')
+        self.speed = QLabel('0.00 MB/s')
+        self.speed.setWordWrap(True)
+        progress_label = QLabel('Progress:\t')
+        self.progress = QLabel('0/0')
         aid_label = QLabel('aid:\t')
         aid = QLabel('test')
         cid_label = QLabel('cid:\t')
         cid = QLabel('test')
-        self.flayout.addRow(title_label, title)
+        self.flayout.addRow(speed_label, self.speed)
+        self.flayout.addRow(progress_label, self.progress)
         self.flayout.addRow(aid_label, aid)
         self.flayout.addRow(cid_label, cid)
-        self.flayout.addRow(author_label, author)
+        
         #将局部布局设为部件类的对象, 这就不会出现布局冲突问题
         hwg = QWidget()
         vwg = QWidget()
@@ -578,6 +690,7 @@ class CentralWidget_multiple(QWidget):
         fflayout_inner_left = QFormLayout()
         topFiller_left.setLayout(fflayout_inner_left)
 
+        self.pbarLabelList = []
         #批量创建进度条变量
         for index, bv_id in enumerate(self.window.bvidList):
             #testLabel = QLabel()
@@ -586,19 +699,28 @@ class CentralWidget_multiple(QWidget):
             createVar['pbar_'+ str(index)] = QProgressBar(self.window)
             createVar['pbar_'+ str(index)].setMinimum(0)
             '1234,123,15,43,123411,4124135315,d,sf,sads,f,24,5t,dasf,das,431,5,df,a,34,513,rfdeD,1234,123,15,43,123411,4124135315,d,sf,sads,f,24,5t,dasf,das,431,5,df,a,34,513,rfdeD,1234,123,15,43,123411,4124135315,d,sf,sads,f,24,5t,dasf,das,431,5,df,a,34,513,rfdeD,1234,123,15,43,123411,4124135315,d,sf,sads,f,24,5t,dasf,das,431,5,df,a,34,513,rfdeD'
-            createVar['pbar_'+ str(index)].setMaximum(100)
-            createVar['pbar_'+ str(index)].setValue(100)
+            #createVar['pbar_'+ str(index)].setMaximum(100)
+            #createVar['pbar_'+ str(index)].setValue(100)
             self.PBarList.append(createVar['pbar_'+ str(index)])
-            fflayout_inner_left.addRow(bv_id, self.PBarList[index])
+            label = QLabel()
+            label.setText(str(index))
+            self.pbarLabelList.append(label)
+            fflayout_inner_left.addRow(label, self.PBarList[index])
             QApplication.processEvents()
             pass
         self.scroll_left = QScrollArea()
         self.scroll_left.setWidget(topFiller_left)
         self.flayout_left.addWidget(self.scroll_left)
         pass
+    #使用自定义信号有助于结构化构造
+    def sendStartSignal(self):
+        self.startSignal.emit()
+    #send searching signal for video info.
+    def sendSearchSignal(self):
+        self.searchSignal.emit(self.indexCombo.currentText())
+        pass
     pass
-
-#获取多个视频的子窗口类
+#获取多个视频定位信息的子窗口类
 class Child_Multi(QWidget):
     multiSignal = QtCore.pyqtSignal([list, str, str])
     def __init__(self, window: Example):
@@ -657,6 +779,70 @@ class Child_Multi(QWidget):
         bvList = self.bvEdit.text().split(',')
         self.multiSignal[list, str, str].emit(bvList, self.QualityEdit.currentText(), self.path)
         pass
+    pass
+#直接显示视频信息的窗口类
+class Child_multiple_info(QWidget):
+    def __init__(self, window: Example, video: BiliVideo):
+        super(Child_multiple_info, self).__init__()
+        id_ = id(window)
+        #通过id获取主窗口对象, 可以藉此操作主窗口
+        self.window: Example = get_object(id_)
+        self.video = video
+        self.facePath = 'E:\CodeField_1\Code_Python_E\Project\PyQt5\CrawlerGUI_BiliBili\IconLib\\'
+        self.Init_UI()
+        
+    def Init_UI(self):
+        self.move(400,400)
+        self.setMinimumWidth(800)
+        self.setMinimumHeight(1000)
+        print('yes')
+        #Total layout
+        self.setWindowTitle('VideoInformation')
+        self.flayout = QFormLayout(self)
+        
+        #The following is to set face of the video
+        self.video.GetFace(path= self.facePath)
+        size = (350,220)
+        lbl = QLabel()
+        lbl.resize(*size)
+        facePath = self.facePath + 'face.jpg'
+        image = QImage(facePath)
+        image = image.scaled(*size)                                
+        lbl.setPixmap(QPixmap.fromImage(image))
+        imageBox = QHBoxLayout()
+        imageBox.addStretch(1)
+        imageBox.addWidget(lbl, 3)
+        imageWB = QWidget()
+        imageWB.setLayout(imageBox)
+        self.flayout.addWidget(imageWB)
+        
+        topFiller = QWidget()
+        topFiller.setMinimumSize(500, 600)
+        fflayout = QFormLayout()
+        topFiller.setLayout(fflayout)
+        
+        #add title to info layout
+        titleLbl = QLabel()
+        titleLbl.setText(self.video.title)
+        fflayout.addRow('title', titleLbl)
+        for key, value in self.video.TotalInfo().items():
+            #print('{key}:{value}'.format(key= key, value= value))
+            valueLabel = QLabel()
+            valueLabel.setText(str(value))
+            fflayout.addRow(key, valueLabel)
+        
+        scroll_1 = QScrollArea()
+        scroll_1.setWidget(topFiller)
+        self.flayout.addWidget(scroll_1)
+        
+        self.setLayout(self.flayout)
+        #BV16F411j7QC
+        pass
+    pass
+
+#选择用户时中心组件的构造类
+class CentralWidget_user(QWidget):
+    
     pass
 
 if __name__ == '__main__':
