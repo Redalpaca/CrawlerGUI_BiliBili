@@ -76,16 +76,18 @@ class BiliUser(object):
         self.SpaceURL = BiliUser.SpaceURL_mode.format(userID = userID)
         
         self.res = requests.get(self.SpaceURL, headers= BiliUniHeaders)
+        if self.res.status_code == 404:
+            return
         self.name = re.search('title>(.*?)的个人空间_', self.res.text).group(1)
         pass
     #获取用户头像(搜索'face'定位链接)
-    def Profilepic(self, path = 'C:/Users/DELL/Desktop/'):
+    def Profilepic(self, path = 'C:/Users/DELL/Desktop/profile.jpg'):
         soup = BeautifulSoup(self.res.text, 'lxml')
         picURL = soup.find('link', attrs={'rel':'apple-touch-icon'}).attrs['href']
         picURL = 'https:' +picURL
         print(picURL)
         res = requests.get(picURL, headers=BiliDownloadHeaders)
-        with open(path + self.name + '_Face.jpg', 'wb') as f:
+        with open(path, 'wb') as f:
             f.write(res.content)
     #获取所有视频的bv号序列
     def VideoBVList(self, begin=1, end=1000):
@@ -209,8 +211,11 @@ class BiliBili(object):
     pass
 
 
-site = BiliBili()
-
-
+if __name__ == '__main__':
+    user = BiliUser('35671002')
+    print(user.VideoList()[1])
+    
+#'BV1r14y1W7pv', 'BV1sG4y1k7iF', 'BV1Av4y1c7wz', 'BV1fe4y1D7Vz', 'BV1pt4y1V7QE', 'BV1ZS4y147Tz', 'BV1aF411P7qD', 'BV1MY4y1j7rr'
+#BV1r14y1W7pv,BV1sG4y1k7iF, asdfasdfaasdfasdfasdf, BV1fe4y1D7Vz
 
 

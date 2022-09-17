@@ -7,6 +7,7 @@ import os
 from tqdm import tqdm
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
+from PyQt5.QtCore import pyqtSignal, QObject, pyqtSlot, QMutex
 import time
 #重要提醒: 注意在本项目中, 函数或方法的path参数通常都需要在末尾添加'/', 如:'C:/Users/DELL/Desktop/'
 #重要提醒: 支持不同清晰度下载的方法需要ffmpeg第三方工具的支持, 若cmd显示找不到对应的程序, 可尝试将ffmpeg.exe放入system32文件夹中(详见python os.system函数的具体实现方式)
@@ -52,7 +53,20 @@ BiliApiHeaders = {
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
     'user-agent':'Mozilla/5.0(WindowsNT10.0;Win64;x64)AppleWebKit/537.36(KHTML,likeGecko)Chrome/103.0.0.0Safari/537.36'
 }
-
+"""
+from moviepy.editor import AudioFileClip, VideoFileClip
+def merge(videoTitle, audioTitle):
+    video_path = videoTitle 
+    audio_path = audioTitle 
+    # 提取音轨
+    audio = AudioFileClip(audio_path)
+    # 读入视频
+    video = VideoFileClip(video_path)
+    # 将音轨合并到视频中
+    video = video.set_audio(audio)
+    # 输出
+    video.write_videofile("{title}.mp4".format(title = videoTitle.replace('.mp4','') + '_merge.mp4'))
+"""
 def GetTitle(url, headers= BiliUniHeaders):
     html = requests.get(url, headers).text
     soup = BeautifulSoup(html, 'lxml')
@@ -170,31 +184,55 @@ def Download_UIpbar(url, pbar: QProgressBar, path, speedLabel: QLabel = None):
                         #print(' Speed: ' + '%.2f'%speed + 'M/S')
                         if speedLabel != None:
                             speedLabel.setText('%.2f MB/s'%speed)
+                            pass
                         lastTime = time.time()
         return file_size
-#只包含UI进度条的原始函数
-def Download_UIpbar_origin(url, pbar: QProgressBar, path):
-        #先获取内容大小
-        try:
-            #stream元素设定当访问content元素时才获取输入流
-            res = requests.get(url, headers= BiliDownloadHeaders, stream= True)
-            ResHeaders = res.headers
-            file_size = int(ResHeaders['Content-Length'])
-        except:
-            print('ERROR: Unsuccessful to obtain the content.(Perhaps the url is overdue.)')
-            file_size = 0
-        pbar.setMaximum(file_size)
-        with open(path, 'wb') as f:
-            CurrentValue = 0
-            for chunk in res.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
-                    CurrentValue += 1024
-                    pbar.setValue(CurrentValue) #设置进度条进度
-                    QApplication.processEvents() #实时更新进度条
-        return file_size  
+    
+lock = QMutex()    
+    
+def Download_UIpbar_thread(url, pbar: QProgressBar, path, signal: pyqtSignal, speedLabel: QLabel = None, label: QLabel= None):
+    #先获取内容大小
+    try:
+        #stream元素设定当访问content元素时才获取输入流
+        res = requests.get(url, headers= BiliDownloadHeaders, stream= True)
+        ResHeaders = res.headers
+        file_size = int(ResHeaders['Content-Length'])
+    except:
+        print('ERROR: Unsuccessful to obtain the content.(Perhaps the url is overdue.)')
+        file_size = 0
+    pbar.setMaximum(file_size)
+    global lock
+    count = 0
+    count_tmp = 0
+    with open(path, 'wb') as f:
+        lastTime = time.time()
+        for chunk in res.iter_content(chunk_size=1024):
+            if chunk:
+                f.write(chunk)
+                count += 1024
+                
+                signal.emit(count)
+                progress = count/file_size * 100
+                #pbar.setValue(count) #设置进度条进度
+                #QApplication.processEvents() #实时更新进度条
+                currentTime = time.time()
+                timeSpan = currentTime - lastTime
+                if timeSpan >= 0.2:
+                    speed = (count - count_tmp) / 1024 / 1024 / timeSpan
+                    count_tmp = count
+                    #print(' Speed: ' + '%.2f'%speed + 'M/S')
+                    #speedLabel.setText('%.2f MB/s'%speed)
+                    #label.setText('{pgs}% \t{speed}M/S'.format(pgs=progress, speed = speed))
+                    label.setText('%.2f'%progress+ '\%\t' +'%.2fM/S'%speed)
+                    pass
+                    lastTime = time.time()
+        signal.emit(file_size)
+        label.setText('100.00%\t\t')
+    return file_size
+
 #Bilivideo类, 传入bvid即可自动构造video实例
 class BiliVideo(object):
+    
     model = 'https://www.bilibili.com/video/'
     UniHeaders = BiliUniHeaders
     StatusModeStr = re.compile('2..')
@@ -354,70 +392,6 @@ class BiliVideo(object):
         print('{name}.mp4 Down.'.format(name= self.title), end=' ')
         return True
     #原始版本: 获取指定清晰度的视频音频原始URL
-    """ 
-    ! Attention !
-    原DetailedLink方法获取的视频链接会定时失效, 需要对获取的链接更换域名
-    """
-    #设定的tail参数是为了下载多p视频而准备的, 普通视频默认无tail
-    def DetailedLink_old(self, Quality: str='360p', tail = ''):
-        html = requests.get(url=self.url + tail, headers= BiliUniHeaders).text
-        #Ctrl+F搜索以获悉不同清晰度的播放链接位置。这些信息是以json格式存储的。分析结构得到结果
-        modestr = re.compile('window.__playinfo__=(.*?)</script>')
-        jsonFile = re.search(modestr, html).group(1)
-        dict_0 = json.loads(jsonFile)
-
-        VideoList = dict_0['data']['dash']['video']
-        AudioList = dict_0['data']['dash']['audio']
-        
-        #1080p+有两种代码: 112, 116, 带来一定的困难
-        QualityDict = {"4k":[120,6], "1080p+":[116,5], "1080p":[80,4], "720p":[64,3], "480p":[32,2], "360p":[16,1]}
-        ReverseQualityDict = {'120':'4k','116':'1080p+','112':'1080p+','80':'1080p','64':'720p','32':'480p'}
-        
-        MaxQuality = VideoList[0]['id']
-        print(MaxQuality)
-        #注意ListLen不一定是清晰度的个数, 有些视频的list比较怪异, 是三个为一组的, 还是采用复杂度o(n)的线性查找吧, 反正表也不大.
-        ListLen = len(VideoList)
-        descript = Quality
-        #输入清晰度的格式是否正确
-        try:
-            QualityDict[descript]
-        except KeyError :
-            print('\"%s\" has illigal format.'%descript)
-            print('LegalFormat: [4k,1080p+,1080p,720p,480p,360p]')
-            return {'video':VideoList[0]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
-        
-        #清晰度是否过高
-        if MaxQuality == 112: #处理特殊情况: 1080p+的id为112(番剧?)
-            index = 0
-            for i, element in enumerate(VideoList):
-                if element['id'] == 112 :
-                    index = i
-                    break
-            return {'video':VideoList[index]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
-        #正常情况下的处理: 在字典中寻找并比较id值
-        if(QualityDict[descript][0] > MaxQuality):
-            print('The VideoQuality is too high.(Or the Cookie is Overdue)')
-            print('HighestQuality: %s'%ReverseQualityDict[str(MaxQuality)])
-            return {'video':VideoList[0]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
-
-        index = 0
-        #index = ListLen - QualityDict[descript][1]
-        for i, element in enumerate(VideoList):
-            if element['id'] == QualityDict[descript][0] :
-                index = i
-                break
-        
-        #print(QualityDict[descript][1])
-        #print(index)
-        #print(index)
-        print('testID = ', end='')
-        print(VideoList[index]['id'])
-        #print(VideoList[index]['baseUrl'])
-        Tempdict= {'video':VideoList[index]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
-        return Tempdict
-        pass    
-    #获取指定清晰度的视频音频原始URL的方法, 打了补丁
-    #若失效, 尝试其他域名: upos-sz-mirrorali 
     def DetailedLink(self, Quality: str='360p', tail = ''):
         html = requests.get(url=self.url + tail, headers= BiliUniHeaders).text
         #Ctrl+F搜索以获悉不同清晰度的播放链接位置。这些信息是以json格式存储的。分析结构得到结果
@@ -483,22 +457,6 @@ class BiliVideo(object):
         Tempdict= {'video':VideoUrl, 'audio':AudioUrl}
         return Tempdict
         pass    
-    #可分清晰度的下载 (仅下载纯视频或音频, 音频仅下载最高清晰度的)
-    def DetailedVideoDownload(self, Quality:str ='360p', location= 'C:/Users/DELL/Desktop/'):
-        DownloadURL = self.DetailedLink(Quality)['video']
-        Video = requests.get(DownloadURL, headers=BiliDownloadHeaders).content
-        print('Downloading')
-        with open(location + self.title + Quality +'.mp4', 'wb') as f:
-            f.write(Video)
-        print('{name}.mp4 Down.'.format(name= self.title + Quality))
-        pass
-    def DetailedAudioDownload(self, Quality:str ='360p', location= 'C:/Users/DELL/Desktop/'):
-        DownloadURL = self.DetailedLink()['audio']
-        Audio = requests.get(DownloadURL, headers=BiliDownloadHeaders).content
-        with open(location + self.title + Quality + '.mp3', 'wb') as f:
-            f.write(Audio)
-        print('{name}.mp3 Down.'.format(name= self.title))
-        pass
     #音视频下载并合并
     def MergeOutput(self, Quality = '360p', path = 'C:/Users/DELL/Desktop/', AddName = '', pbar = False):
         #类名检测, 若是番剧类型则将名称附上序号
@@ -617,7 +575,277 @@ class BiliVideo(object):
             return False
         return True
     
-    def mergeOutput_UIpbar(self, pbar: QProgressBar, label: QLabel, speedLabel: QLabel = None, Quality = '360p', path = 'C:/Users/DELL/Desktop/'):
+    def mergeOutput_UIpbar(self, pbar: QProgressBar, label: QLabel, speedLabel: QLabel = None, keep = False, threadOpen = False , Quality = '360p', path = 'C:/Users/DELL/Desktop/', path_ffmpeg = 'ffmpeg.exe'):
+        #类名检测, 若是番剧类型则将名称附上序号
+        """
+        if type(self) == Bangumi:
+            order = self.OrderNum()[0]
+            print('Order = {order}'.format(order = order))
+            AddName = '_No.' + order
+        """
+        Link = self.DetailedLink(Quality)
+        if Link == None: #检测获取链接的函数结果是否有误
+            return
+        VideoURL = Link['video']
+        AudioURL = Link['audio']
+        videoname = path + self.bvid + Quality +'_video.mp4'
+        audioname = path + self.bvid + '_audio.mp3'
+        
+        #是否启用进度条?
+        #print('Downloading video:')
+        if not threadOpen:
+            label.setText('Downloading video:')
+            Download_UIpbar(VideoURL, path = videoname, pbar= pbar, speedLabel= speedLabel)
+            pbar.reset()
+            #print('Downloading audio:')
+            label.setText('Downloading audio:')
+            Download_UIpbar(AudioURL, path = audioname, pbar= pbar, speedLabel= speedLabel)
+        pass
+        
+        print(f'OutputPath: {path}')
+        #可以设置让ffmpeg命令不返回信息: 使用命令-loglevel quiet, -y参数告知ffmpeg检测到同名文件则强制覆盖
+        #os.system('ffmpeg -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.bvid + '_' +Quality))
+        #E:\CodeField_1\BiliCrawler\ffmpeg.exe
+        os.system('{path_ffmpeg} -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.bvid + '_' +Quality, path_ffmpeg = path_ffmpeg))
+        #不使用第三方工具的话得靠python带的库, 但它真的太慢了
+        #merge(videoname, audioname)
+        
+        #删除纯视频和音频文件
+        if keep == False:
+            os.remove('%s'%videoname)
+            os.remove('%s'%audioname)
+        print('Video:%s.mp4 Merge Over.'%(self.title + Quality))
+        pass    
+    pass
+
+class BiliVideo_thread(QObject):
+    pbarUpdateSignal = pyqtSignal(int)
+    model = 'https://www.bilibili.com/video/'
+    UniHeaders = BiliUniHeaders
+    StatusModeStr = re.compile('2..')
+    def __init__(self, bvid: str, BiliHeaders: dict= BiliUniHeaders):
+        super().__init__()
+        #Web attrs
+        self.url = BiliVideo.model + bvid
+        self.Headers = BiliHeaders
+        self.DownloadHeaders = BiliDownloadHeaders
+        self.res = requests.get(self.url, headers= BiliUniHeaders)
+        self.html = GetHtml(self.url, self.Headers)
+        if re.search(BiliVideo.StatusModeStr, str(requests.get(self.url, headers=BiliUniHeaders).status_code)) == None:
+            print('Illigal bvid.')
+            return None   
+        
+        #Video id (and mid of the author)
+        self.bvid = bvid
+        self.aid = re.search(re.compile(r'\"aid\":(\b\d+\b)'), self.html).group(1)
+        self.cid = re.search(re.compile(r'\"cid\":(\b\d+\b)'), self.html).group(1)
+        self.mid_author = re.search(re.compile(r'mid=(\b\d+\b)'), self.html).group(1)
+        
+        #Get title
+        title = GetTitle(self.url, self.Headers)
+        try:
+            self.title = (re.search(re.compile('(.*?)_') ,title)).group(1)
+        except:
+            self.title = title
+        pass
+    #Get fundamental message
+    def GetAID(self):
+        print(self.aid)
+        return self.aid
+    def GetCID(self):
+        print(self.cid)
+        return self.cid
+    #获取统计信息
+    def TotalInfo(self):
+        Html = self.res.text
+        mode = '.{300}23295.{200}'
+        mode = '"owner":{(.*?)}'
+        AuthorInfo = re.search(mode, Html).group(1)
+        mode = '"stat":{(.*?)}'
+        VideoInfo = re.search(mode, Html).group(1)
+        DictStr = '{' +VideoInfo + ',' + AuthorInfo +'}'
+        InfoDict: dict = json.loads(DictStr)
+        return InfoDict
+    #获取标签
+    def GetTag(self, detailed = False):
+        apiURL_mode = 'https://api.bilibili.com/x/web-interface/view/detail/tag?aid={aid}&cid={cid}'
+        apiURL = apiURL_mode.format(aid = self.aid, cid = self.cid)
+        res = requests.get(apiURL, headers= BiliApiHeaders)
+        DetailDict = json.loads(res.text)
+        if detailed :
+            return DetailDict
+        TagList = []
+        for element in DetailDict['data']:
+            temp = {'tag_id':element['tag_id'], 'tag_name':element['tag_name']}
+            TagList.append(temp)
+        return TagList
+    #获取视频封面
+    def GetFace(self, path = 'C:/Users/DELL/Desktop/'):
+        '<meta data-vue-meta="true" itemprop="image" content="http://i0.hdslb.com/bfs/archive/9da93ef03a89a4384c03cca9189d61c964ebf20b.jpg">'
+        soup = BeautifulSoup(self.html, 'lxml')
+        node = soup.find('meta',attrs={'itemprop':"image"})
+        url = node.attrs['content']
+        Download_Pbar(url, path= path + 'face.jpg')
+        return True
+        pass
+    #获取评论
+    def GetComments(self, index = 0):
+        """
+        Arg:
+            mode (str, optional): Allows 'hot', 'new', 'regular', defaults to 'hot' 
+            index (int, optional): Index refers to page of comment. A single page only shows 20 comments. 
+        """
+        mode = 'hot'
+        modeDict = {'regular':1, 'new':2, 'hot':3}
+        try:
+            modeNum = modeDict[mode]
+        except KeyError:
+            print('Illigal mode.')
+            modeNum = 3
+            pass
+        #next参数在热门评论模式(mode=3)下是显示第几页评论(1页20条)
+        apiURL_mode = 'https://api.bilibili.com/x/v2/reply/main?mode={mode}&next={index}&oid={aid}&plat=1&type=1'
+        apiURL = apiURL_mode.format(mode = modeNum, aid = self.aid, index = index)
+        res = requests.get(apiURL, headers= BiliApiHeaders)
+        dict_0 = json.loads(res.text)
+        RepliesList = dict_0['data']['replies']
+        if RepliesList == None:
+            return None
+        FinalList = []
+        print(len(RepliesList))
+        for element in RepliesList:
+            #从单独api无法获取楼中楼所有评论, 进入新的api需要replyID
+            rpid = element['rpid_str']
+            temp = {'userID':element['mid'], 'content':element['content']['message'], 'InnerReplies':None}
+            apiURL_root = 'https://api.bilibili.com/x/v2/reply/reply?oid={aid}&pn=1&ps=10&type=1&root={rpid}'
+            apiURL_root = apiURL_root.format(aid = self.aid, rpid = rpid)
+            if element['replies'] != None:
+                res = requests.get(apiURL_root, headers= BiliApiHeaders)
+                dict_1 = json.loads(res.text)
+                InnerReplies = dict_1['data']['replies']
+
+                SimpleReplyList = []
+                try:
+                    for reply in InnerReplies:
+                        Innertemp = {'userID':reply['mid'], 'content':reply['content']['message']}
+                        SimpleReplyList.append(Innertemp)
+                    temp['InnerReplies'] = SimpleReplyList
+                except TypeError:
+                    pass
+            FinalList.append(temp)
+            pass
+
+        #print(len(RepliesList[0]['replies']))
+        #for key, value in RepliesList[0].items():
+        #    print(key, value, end='\n\n')
+        return FinalList
+        pass
+    #子类中的测试方法, 仅bangumi对象可以调用
+    def OrderNum(self):
+        if type(self) != Bangumi:
+            print('This video might not be bangumi.')
+            return False
+        soup = BeautifulSoup(self.res.text, 'lxml')
+        #'<span class="ep-list-progress">6/6</span>'
+        temp = soup.find('span', class_= 'ep-list-progress').string
+        mode = re.compile('(\d+)/(\d+)')
+        index = re.search(mode, temp).group(1)
+        total = re.search(mode, temp).group(2)
+        return [index, total]
+    #简易下载
+    def DownloadLink(self, quality: int=0): #if quality == 1, you will get high_quality videolink
+        #类名检测
+        if type(self) == Bangumi:
+            print('This video might be bangumi, try method: DetailedLink')
+            return False
+        TemplateURL = 'https://api.bilibili.com/x/player/playurl?avid={AID}&cid={CID}&qn=1&type=&otype=json&platform=html5&high_quality={Bool}'
+        JumpURL = TemplateURL.format(AID = self.aid, CID = self.cid, Bool = quality)
+        JumpHtml = requests.get(JumpURL, headers={}).text #不需要请求头
+        try:
+            DownloadURL_0 = re.search(re.compile('\"url\":\"(.*?)\"'), JumpHtml).group(1)
+        except:
+            return ''
+        DownloadURL = DownloadURL_0.replace(r'\u0026','&')
+        return DownloadURL
+    def DownloadVideo(self, location: str='C:/Users/DELL/Desktop/video_4.mp4', quality: int=0):
+        #类名检测
+        if type(self) == Bangumi:
+            print('This video might be bangumi, try method: MergeOutput(or MultipleDown)')
+            return False
+        DownloadURL = self.DownloadLink(quality)
+        video = requests.get(DownloadURL, headers=self.Headers).content
+        with open(location, 'wb') as f:
+            f.write(video)
+        print('{name}.mp4 Down.'.format(name= self.title), end=' ')
+        return True
+    #原始版本: 获取指定清晰度的视频音频原始URL
+    def DetailedLink(self, Quality: str='360p', tail = ''):
+        html = requests.get(url=self.url + tail, headers= BiliUniHeaders).text
+        #Ctrl+F搜索以获悉不同清晰度的播放链接位置。这些信息是以json格式存储的。分析结构得到结果
+        modestr = re.compile('window.__playinfo__=(.*?)</script>')
+        jsonFile = re.search(modestr, html).group(1)
+        dict_0 = json.loads(jsonFile)
+
+        VideoList = dict_0['data']['dash']['video']
+        AudioList = dict_0['data']['dash']['audio']
+        
+        #1080p+有两种代码: 112, 116, 带来一定的困难
+        QualityDict = {"4k":[120,6], "1080p+":[112,5], "1080p":[80,4], "720p":[64,3], "480p":[32,2], "360p":[16,1]}
+        ReverseQualityDict = {'120':'4k','116':'1080p+','112':'1080p+','80':'1080p','64':'720p','32':'480p'}
+        
+        MaxQuality = VideoList[0]['id']
+        print(MaxQuality)
+        #注意ListLen不一定是清晰度的个数, 有些视频的list比较怪异, 是三个为一组的, 还是采用复杂度o(n)的线性查找吧, 反正表也不大.
+        ListLen = len(VideoList)
+        descript = Quality
+        #输入清晰度的格式是否正确
+        try:
+            QualityDict[descript]
+        except KeyError :
+            print('\"%s\" has illigal format.'%descript)
+            print('LegalFormat: [4k,1080p+,1080p,720p,480p,360p]')
+            return {'video':VideoList[0]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
+        
+        #清晰度是否过高
+        if MaxQuality == 116: #处理特殊情况: 1080p+的id为112(番剧?)
+            index = 0
+            for i, element in enumerate(VideoList):
+                if element['id'] == 112 :
+                    index = i
+                    break
+            #return {'video':VideoList[index]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
+        #正常情况下的处理: 在字典中寻找并比较id值
+        if(QualityDict[descript][0] > MaxQuality):
+            print('The VideoQuality is too high.(Or the Cookie is Overdue)')
+            print('HighestQuality: %s'%ReverseQualityDict[str(MaxQuality)])
+            return {'video':VideoList[0]['baseUrl'], 'audio':AudioList[0]['baseUrl']}
+
+        index = 0
+        #index = ListLen - QualityDict[descript][1]
+        for i, element in enumerate(VideoList):
+            if element['id'] == QualityDict[descript][0] :
+                index = i
+                break
+        VideoUrl:str = VideoList[index]['baseUrl']
+        AudioUrl:str = AudioList[0]['baseUrl']
+        
+        #测试用代码, 观察清晰度选择是否出现问题
+        print('testID = ', end='')
+        print(VideoList[index]['id'])
+        
+        
+        
+        #补丁部分, 修改获取的临时url的域名
+        modestr = re.compile('https://(.*?).bilivideo.com') 
+        substr = re.search(modestr, VideoUrl).group(1)
+        VideoUrl = VideoUrl.replace(substr, 'upos-sz-mirrorhwo1')
+        
+        #print(VideoList[index]['baseUrl'])
+        Tempdict= {'video':VideoUrl, 'audio':AudioUrl}
+        return Tempdict
+        pass    
+    #音视频下载并合并
+    def MergeOutput(self, Quality = '360p', path = 'C:/Users/DELL/Desktop/', AddName = '', pbar = False):
         #类名检测, 若是番剧类型则将名称附上序号
         """
         if type(self) == Bangumi:
@@ -634,25 +862,151 @@ class BiliVideo(object):
         audioname = path + self.title + '_audio.mp3'
         
         #是否启用进度条?
+        if pbar == True:
+            print('Downloading video:')
+            Download_Pbar(VideoURL, path = videoname)
+            print('Downloading audio:')
+            Download_Pbar(AudioURL, path = audioname)
+            pass
+        else:
+            Video = requests.get(VideoURL, headers= BiliDownloadHeaders).content
+            Audio = requests.get(AudioURL, headers= BiliDownloadHeaders).content
+            with open(videoname, 'wb') as f:
+                f.write(Video)
+            with open(audioname, 'wb') as f:
+                f.write(Audio)
+        
+        print(f'OutputPath: {path}')
+        #可以设置让ffmpeg命令不返回信息: 使用命令-loglevel quiet, -y参数告知ffmpeg检测到同名文件则强制覆盖
+        os.system('ffmpeg -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.title + Quality + AddName))
+        #删除纯视频和音频文件
+        os.remove('%s'%videoname)
+        os.remove('%s'%audioname)
+        print('Video:%s.mp4 Merge Over.'%(self.title + Quality + AddName))
+        pass
+    #下载多p视频的方法
+    #由于附加了多p检测, 对所有视频都可以使用该方法.
+    def MultipleDown(self, Quality='360p', path= 'C:/Users/DELL/Desktop/', intergrate = False, begin = 1, end = 1000, pbar = False):
+        path_origin = path
+        #防止对普通视频误调用该方法, 附加多p检测
+        mode = re.compile('视频选集')
+        if re.search(mode, self.html) == None:
+            #print('This is a Single Video.')
+            self.MergeOutput(Quality, path)
+            return
+        #正则获取该投稿内的视频总数
+        mode = re.compile('>\(\d/(\d+)\)</span')
+        Amount = re.search(mode, self.html).group(1)
+        #确定下载范围, 防止越界
+        end = end if int(Amount) > end else int(Amount)
+        begin = begin if end >= begin else 1
+        #创建新文件夹
+        path = path + str(self.bvid) + '/'
+        if(not os.path.exists(path)):
+            os.makedirs(path)
+        else: #若目录已存在则说明已经下载过了
+            print('Dir already exist.')
+        #循环下载多p视频
+        for i in range(begin-1, end):
+            Link = self.DetailedLink(Quality, tail='?p={index}'.format(index = i+1))#设置tail参数获取其它p的下载地址
+            #获取url与名称
+            VideoURL = Link['video']
+            AudioURL = Link['audio']
+            videoname = path + self.bvid + Quality +'_video.mp4'
+            audioname = path + self.bvid + Quality +'_audio.mp3'
+            #是否启用进度条?
+            if pbar == True:
+                print('Downloading video:')
+                Download_Pbar(VideoURL, path = videoname)
+                print('Downloading audio:')
+                Download_Pbar(AudioURL, path = audioname)
+                pass
+            else:    
+                Video = requests.get(VideoURL, headers= BiliDownloadHeaders).content
+                Audio = requests.get(AudioURL, headers= BiliDownloadHeaders).content
+                with open(videoname, 'wb') as f:
+                    f.write(Video)
+                with open(audioname, 'wb') as f:
+                    f.write(Audio)
+                
+            
+            #-n参数 默认不进行强制覆盖
+            command = 'ffmpeg -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.bvid + Quality + '_p' + str(i+1))
+            os.system(command)
+            os.remove('%s'%videoname)
+            os.remove('%s'%audioname)
+            print('p{index} done.'.format(index = i+1))
+        pass
+        
+        #视频拼接模块
+        if intergrate :
+            Intergrate(self.bvid, path_origin, path_origin)
+            pass
+    #GUI测试使用
+    def qualityCheck(self, Quality = '1080p'):
+        html = requests.get(url=self.url, headers= BiliUniHeaders).text
+        modestr = re.compile('window.__playinfo__=(.*?)</script>')
+        jsonFile = re.search(modestr, html).group(1)
+        dict_0 = json.loads(jsonFile)
+        VideoList = dict_0['data']['dash']['video']
+
+        #1080p+有两种代码: 112, 116, 带来一定的困难
+        QualityDict = {"4k":[120,6], "1080p+":[116,5], "1080p":[80,4], "720p":[64,3], "480p":[32,2], "360p":[16,1]}
+        ReverseQualityDict = {'120':'4k','116':'1080p+','112':'1080p+','80':'1080p','64':'720p','32':'480p'}
+        
+        MaxQuality = VideoList[0]['id']
+        descript = Quality
+        #清晰度是否过高
+        if(QualityDict[descript][0] > MaxQuality):
+            self.HighestQuality = 'HighestQuality: %s'%ReverseQualityDict[str(MaxQuality)]
+            return False
+        return True
+    
+    def mergeOutput_UIpbar(self, pbar: QProgressBar, label: QLabel, speedLabel: QLabel = None, keep = False, threadOpen = True , Quality = '360p', path = 'C:/Users/DELL/Desktop/', path_ffmpeg = 'ffmpeg.exe'):
+        #类名检测, 若是番剧类型则将名称附上序号
+        """
+        if type(self) == Bangumi:
+            order = self.OrderNum()[0]
+            print('Order = {order}'.format(order = order))
+            AddName = '_No.' + order
+        """
+        print(path)
+        print(path_ffmpeg)
+        Link = self.DetailedLink(Quality)
+        if Link == None: #检测获取链接的函数结果是否有误
+            return
+        VideoURL = Link['video']
+        AudioURL = Link['audio']
+        videoname = path + self.bvid + Quality +'_video.mp4'
+        audioname = path + self.bvid + '_audio.mp3'
+        
+        #是否启用进度条?
         #print('Downloading video:')
-        label.setText('Downloading video:')
-        Download_UIpbar(VideoURL, path = videoname, pbar= pbar, speedLabel= speedLabel)
-        pbar.reset()
-        #print('Downloading audio:')
-        label.setText('Downloading audio:')
-        Download_UIpbar(AudioURL, path = audioname, pbar= pbar, speedLabel= speedLabel)
+
+        #label.setText('Downloading video:')
+        Download_UIpbar_thread(VideoURL, path = videoname, pbar= pbar, speedLabel= speedLabel,
+                                signal= self.pbarUpdateSignal, label= label)
+        #label.setText('Downloading audio:')
+        Download_UIpbar_thread(AudioURL, path = audioname, pbar= pbar, speedLabel= speedLabel,
+                                signal= self.pbarUpdateSignal, label= label)
         pass
         
         print(f'OutputPath: {path}')
         #可以设置让ffmpeg命令不返回信息: 使用命令-loglevel quiet, -y参数告知ffmpeg检测到同名文件则强制覆盖
-        os.system('ffmpeg -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.title + Quality))
+        #os.system('ffmpeg -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.bvid + '_' +Quality))
+        #E:\CodeField_1\BiliCrawler\ffmpeg.exe
+        os.system('{path_ffmpeg} -n -loglevel quiet -i \"{video}\" -i \"{audio}\" -c copy \"{video_out}.mp4\"'.format(video = videoname, audio = audioname, video_out = path + self.bvid + '_' +Quality, path_ffmpeg = path_ffmpeg))
+        #不使用第三方工具的话得靠python带的库, 但它真的太慢了
+        #merge(videoname, audioname)
+        
         #删除纯视频和音频文件
-        os.remove('%s'%videoname)
-        os.remove('%s'%audioname)
+        if keep == False:
+            os.remove('%s'%videoname)
+            os.remove('%s'%audioname)
         print('Video:%s.mp4 Merge Over.'%(self.title + Quality))
         pass    
     pass
-
+    
 #目前传参时允许使用seasonID
 class Bangumi(BiliVideo):
     model = 'https://www.bilibili.com/bangumi/play/'
@@ -797,6 +1151,7 @@ def main():
     #bangumi = Bangumi('ep451884')
     #print(bangumi.cid)
     video = BiliVideo('BV1hY411N7Gk')
+    video.qualityCheck()
     #video.MergeOutput(Quality='1080p+')
     #video.MergeOutput(pbar= True)
     #bangumi.MergeOutput(pbar= True, Quality= '1080p')
